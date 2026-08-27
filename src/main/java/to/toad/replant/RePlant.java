@@ -28,10 +28,16 @@ import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
 import java.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class RePlant implements ModInitializer {
 	public static final String MOD_ID = "replant";
-	Queue<BlockPlaceContext> queue = new ArrayDeque<>();
+	private static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+	// Queue is drained fully every tick already (not capped to 1/tick).
+	// Bump capacity so large bursts (fast-mining tools, nukers, etc.) don't
+	// silently drop entries if something upstream backs up for a tick.
+	Queue<BlockPlaceContext> queue = new ArrayDeque<>(256);
 	ServerPlayerGameMode se = null;
 	ServerLevel ServerWorld = null;
 
@@ -45,16 +51,25 @@ public class RePlant implements ModInitializer {
 		PlayerBlockBreakEvents.AFTER.register(this::afterBlockBreak);
 
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
-			// process everything that was queued LAST tick
-			while (!queue.isEmpty()) {
+			// Process everything currently queued. Previously a single
+			// failed placement (e.g. a stale/invalid context when many
+			// blocks are broken in the same tick) would throw and abort
+			// the whole loop, silently dropping every remaining queued
+			// replant for that tick. Now each entry is isolated so one
+			// bad entry can't take the rest down with it.
+			int size = queue.size();
+			for (int i = 0; i < size; i++) {
 				BlockPlaceContext context = queue.poll();
+				if (context == null) break;
 
-				ItemStack stack = context.getItemInHand();
-
-				if (stack.getItem() instanceof BlockItem blockItem) {
-					blockItem.place(context);
+				try {
+					ItemStack stack = context.getItemInHand();
+					if (stack.getItem() instanceof BlockItem blockItem && !stack.isEmpty()) {
+						blockItem.place(context);
+					}
+				} catch (Exception e) {
+					LOGGER.warn("[replant] failed to replant at {}", context.getClickedPos(), e);
 				}
-
 			}
 
 		});
